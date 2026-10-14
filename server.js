@@ -24,6 +24,11 @@ const PROVIDERS = {
   },
 };
 
+if (typeof fetch !== 'function') {
+  console.error('Node.js 18 atau lebih baru diperlukan (fetch tidak tersedia). Set versi Node ke 20.');
+  process.exit(1);
+}
+
 const provider = PROVIDERS[PROVIDER];
 if (!provider) {
   console.error('AI_PROVIDER harus "gemini" atau "anthropic".');
@@ -162,7 +167,11 @@ async function callAnthropic(messages) {
       .trim();
     return { status, answer, truncated: data.stop_reason === 'max_tokens' };
   }
-  return { status, errorType: data && data.error && data.error.type };
+  return {
+    status,
+    errorType: data && data.error && data.error.type,
+    errorMessage: data && data.error && data.error.message,
+  };
 }
 
 async function callGemini(messages) {
@@ -192,7 +201,11 @@ async function callGemini(messages) {
       .trim();
     return { status, answer, truncated: !!candidate && candidate.finishReason === 'MAX_TOKENS' };
   }
-  return { status, errorType: data && data.error && data.error.status };
+  return {
+    status,
+    errorType: data && data.error && data.error.status,
+    errorMessage: data && data.error && data.error.message,
+  };
 }
 
 // ---------- Aplikasi ----------
@@ -245,14 +258,17 @@ app.post('/api/ask', apiLimiter, requireToken, async (req, res) => {
     }
 
     // Jangan mencatat isi percakapan, cukup status dan tipe error.
-    console.error(`Upstream error: provider=${PROVIDER} status=${status} type=${result.errorType}`);
+    const detail = String(result.errorMessage || '').slice(0, 200);
+    console.error(
+      `Upstream error: provider=${PROVIDER} model=${MODEL} status=${status} type=${result.errorType} message=${detail}`
+    );
 
     if (status === 429) {
       return res
         .status(429)
         .json({ error: 'Layanan AI sedang sibuk. Coba lagi sebentar.', code: 'rate_limited' });
     }
-    if (status === 400 || status === 401 || status === 403) {
+    if (status === 400 || status === 401 || status === 403 || status === 404) {
       return res
         .status(502)
         .json({ error: 'Kunci AI atau nama model di server bermasalah.', code: 'upstream_config' });
@@ -262,7 +278,9 @@ app.post('/api/ask', apiLimiter, requireToken, async (req, res) => {
     if (err && err.name === 'AbortError') {
       return res.status(504).json({ error: 'Layanan AI terlalu lama merespons.', code: 'timeout' });
     }
-    console.error('Upstream request failed:', err && err.name);
+    console.error(
+      `Upstream request failed: ${err && err.name}: ${String((err && err.message) || '').slice(0, 200)}`
+    );
     return res.status(502).json({ error: 'Tidak dapat menghubungi layanan AI.', code: 'upstream_error' });
   }
 });
