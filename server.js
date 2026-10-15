@@ -54,20 +54,23 @@ if (typeof fetch !== 'function') {
   process.exit(1);
 }
 
-const provider = PROVIDERS[PROVIDER];
+// Konfigurasi yang kurang TIDAK menghentikan server. Server tetap hidup dan
+// melaporkan variabel apa yang belum diisi lewat /health dan pesan error aplikasi.
+const configProblems = [];
+const provider = PROVIDERS[PROVIDER] || null;
 if (!provider) {
-  console.error(`AI_PROVIDER tidak dikenal. Pilihan: ${Object.keys(PROVIDERS).join(', ')}.`);
-  process.exit(1);
-}
-if (provider.type === 'openai' && !provider.baseUrl) {
-  console.error('AI_BASE_URL wajib diisi untuk provider openai-compatible.');
-  process.exit(1);
+  configProblems.push(`AI_PROVIDER tidak dikenal (pilihan: ${Object.keys(PROVIDERS).join(', ')})`);
+} else if (provider.type === 'openai' && !provider.baseUrl) {
+  configProblems.push('AI_BASE_URL');
 }
 
-const API_KEY = process.env[provider.keyEnv];
+const API_KEY = provider ? process.env[provider.keyEnv] : undefined;
+if (provider && !API_KEY) configProblems.push(provider.keyEnv);
+if (!APP_TOKEN) configProblems.push('APP_TOKEN');
+
 // Jika AI_MODEL kosong: model dipilih otomatis dari daftar resmi akun Anda.
 const MODEL_OVERRIDE = (process.env.AI_MODEL || '').trim();
-const MAX_TOKENS = Number(process.env.AI_MAX_TOKENS) || provider.defaultMaxTokens;
+const MAX_TOKENS = Number(process.env.AI_MAX_TOKENS) || (provider ? provider.defaultMaxTokens : 2048);
 
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const ANTHROPIC_VERSION = '2023-06-01';
@@ -82,11 +85,6 @@ const LIMITS = {
   historyMessages: 12,
   historyMessageChars: 4000,
 };
-
-if (!API_KEY || !APP_TOKEN) {
-  console.error(`${provider.keyEnv} dan APP_TOKEN wajib diisi sebagai environment variable.`);
-  process.exit(1);
-}
 
 const SYSTEM_PROMPT = [
   'Kamu adalah asisten belajar di dalam aplikasi Floating AI.',
@@ -444,8 +442,24 @@ app.set('trust proxy', 1);
 app.use(express.json({ limit: '64kb' }));
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
+  if (configProblems.length) {
+    return res.status(503).json({ status: 'misconfigured', missing: configProblems });
+  }
+  return res.json({ status: 'ok' });
 });
+
+function requireConfigured(req, res, next) {
+  if (configProblems.length) {
+    return sendError(
+      res,
+      503,
+      'server_misconfigured',
+      'Server belum dikonfigurasi.',
+      `variabel belum diisi: ${configProblems.join(', ')}`
+    );
+  }
+  return next();
+}
 
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -470,7 +484,7 @@ function sendError(res, status, code, message, detail) {
   return res.status(status).json(body);
 }
 
-app.post('/api/ask', apiLimiter, requireToken, async (req, res) => {
+app.post('/api/ask', apiLimiter, requireConfigured, requireToken, async (req, res) => {
   let messages;
   try {
     messages = buildMessages(req.body || {});
@@ -525,4 +539,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(
     `Floating AI backend berjalan di port ${PORT} (provider: ${PROVIDER}, model: ${MODEL_OVERRIDE || 'otomatis'})`
   );
+  if (configProblems.length) {
+    console.error(`PERINGATAN: konfigurasi belum lengkap. Isi environment variable: ${configProblems.join(', ')}`);
+  }
 });
